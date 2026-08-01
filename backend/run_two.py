@@ -13,6 +13,7 @@ mask 文件命名为 mask.<流域编号>.tif 和 mask.<流域编号>.pfb
 
 import os
 import sys
+import shutil          # 新增：用于删除目录
 import subprocess
 import numpy as np
 import rasterio
@@ -67,9 +68,9 @@ def get_output_filename(input_filename, basin_code):
     mapping = {
         "CHN.slopex.2026.fix.pfb": "slopex",
         "CHN.slopey.2026.fix.pfb": "slopey",
-        "Shangguan_300m_FBZ_fix.pfb": "Shangguan",
-        "CONCN_manning.fix.2026.pfb": "CONCN_manning",
-        "GLHYMPS1.0_multi_efold_fix.pfb": "GLHYMPS1.0"
+        "Shangguan_300m_FBZ_fix.pfb": "bedrock",   # 修改为 bedrock
+        "CONCN_manning.fix.2026.pfb": "manning",
+        "GLHYMPS1.0_multi_efold_fix.pfb": "subsurface"
     }
     base_name = os.path.basename(input_filename)
     if base_name not in mapping:
@@ -97,7 +98,7 @@ def convert_mask_tif_to_pfb(mask_tif_path, mask_pfb_path):
     with rasterio.open(mask_tif_path) as src:
         mask_2d = src.read(1).astype(np.uint8)   # 原值：1=内，0=外
     mask_3d = mask_2d[np.newaxis, :, :].astype(np.float64, order='C', copy=True)
-    write_pfb(mask_pfb_path, mask_3d,dx=961.72,dy=961.72,dz=200,dist=False)
+    write_pfb(mask_pfb_path, mask_3d, dx=961.72, dy=961.72, dz=200, dist=False)
     print(f"[转换] 掩膜 TIF 已转换为 PFB: {mask_pfb_path} (流域内=1, 流域外=0)")
 
 
@@ -137,6 +138,12 @@ def main():
 
     # 2. 创建以流域编码命名的输出子目录
     output_dir = os.path.join(BASE_OUTPUT_DIR, pfbas_code)
+    
+    # ★★★ 新增：如果目录已存在，先删除整个目录（清理旧文件） ★★★
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+        print(f"[清理] 已删除旧输出目录: {output_dir}")
+    
     ensure_dir(output_dir)
     print(f"[信息] 输出目录: {output_dir}")
 
@@ -202,7 +209,6 @@ def main():
         output_path = os.path.join(output_dir, output_file)
 
         print(f"\n裁剪 {input_file} -> {output_file}")
-        # 这里文件已经在前面检查过存在性，无需再检查，但保留防御
         if not os.path.exists(input_path):
             print(f"警告：找不到输入文件 {input_path}，跳过（不应发生）")
             continue
