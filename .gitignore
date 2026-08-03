@@ -109,3 +109,4 @@ outputs/
 # Conda environment file (optional, but keep if you want)
 # environment.yml is kept, but lock files can be ignored
 environment.lock.yml
+node_modules/

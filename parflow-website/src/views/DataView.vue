@@ -1,7 +1,5 @@
 <template>
   <div id="data-view">
-    <h2 style="text-align: center; margin: 20px 0;">🌊 流域数据分享平台</h2>
-
     <!-- 搜索区域 -->
     <el-card class="search-card" shadow="never">
       <el-form :inline="true" :model="searchForm" class="search-form">
@@ -26,225 +24,295 @@
             <el-option label="海河流域" value="海河流域" />
           </el-select>
         </el-form-item>
+        <el-form-item label="流域级别">
+          <el-select
+            v-model="searchForm.level"
+            placeholder="请选择级别"
+            clearable
+            style="width: 140px;"
+          >
+            <el-option
+              v-for="num in levelOptions"
+              :key="num"
+              :label="num + '级'"
+              :value="num"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="handleSearch">搜索</el-button>
+          <el-button type="primary" @click="handleSearch" :loading="loading">搜索</el-button>
           <el-button @click="resetSearch">重置</el-button>
+          <el-button type="primary" @click="handleDownload" :loading="downloading">下载数据</el-button>
         </el-form-item>
       </el-form>
     </el-card>
 
-    <!-- 数据表格 -->
-    <el-card class="table-card" shadow="never">
-      <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <span>流域列表</span>
-          <span style="font-size: 14px; color: #909399;">
-            共 {{ tableData.length }} 条记录
-          </span>
-          <el-button type="primary" @click="handleDownload">下载数据</el-button>
-        </div>
-      </template>
-
-      <el-table
-        :data="tableData"
-        border
-        stripe
-        style="width: 100%;"
-        @selection-change="handleSelectionChange"
-      >
-        <!-- 手动复选框列，表头带“全选”文字 -->
-        <el-table-column width="80" align="center">
+    <!-- 主体区域：左侧地图 + 右侧流域信息 -->
+    <el-row :gutter="0" class="main-row">
+      <el-col :xs="24" :sm="16" :md="16" :lg="16" class="map-col">
+        <el-card class="map-card" shadow="never">
           <template #header>
-            <span style="display: flex; align-items: center; justify-content: center;">
-              <el-checkbox :model-value="isAllSelected" @change="toggleAllSelection" />
-              <span style="margin-left: 4px; font-weight: bold; font-size: 14px; color: #303133;">全选</span>
-            </span>
+            <span>流域分布地图</span>
           </template>
-          <template #default="{ row }">
-            <el-checkbox
-              :model-value="isSelected(row)"
-              @change="() => toggleRow(row)"
-            />
+          <MapComponent
+            ref="mapComponent"
+            :center="mapCenter"
+            :markers="mapMarkers"
+            @marker-click="onMarkerClick"
+          />
+        </el-card>
+      </el-col>
+      <el-col :xs="24" :sm="8" :md="8" :lg="8" class="info-col">
+        <el-card class="info-card" shadow="never">
+          <template #header>
+            <span>流域信息</span>
           </template>
-        </el-table-column>
-
-        <el-table-column prop="id" label="编号" width="120" />
-        <el-table-column prop="name" label="名称" width="150" />
-        <el-table-column prop="region" label="所属地区" width="140" />
-        <el-table-column prop="level" label="级别" width="100" />
-        <el-table-column prop="description" label="基本信息" min-width="200" show-overflow-tooltip />
-        <el-table-column label="操作" width="120" fixed="right">
-          <template #default="scope">
-            <el-button size="small" type="primary" plain @click="viewDetail(scope.row)">
-              查看
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
-
-    <!-- 地图容器（占位） -->
-    <el-card class="map-card" shadow="never">
-      <template #header>
-        <span>流域分布地图</span>
-      </template>
-      <div class="map-container" id="mapContainer">
-        <div style="color: #bbb; text-align: center; line-height: 400px; user-select: none;">
-          🗺️ 地图加载中 ...
-        </div>
-      </div>
-    </el-card>
+          <div v-if="currentWatershed" class="info-content">
+            <p><strong>编号：</strong>{{ currentWatershed.id }}</p>
+            <p><strong>级别：</strong>{{ currentWatershed.level }}级</p>
+            <p><strong>所属地区：</strong>{{ currentWatershed.region }}</p>
+            <p><strong>经度：</strong>{{ currentWatershed.lng || '—' }}</p>
+            <p><strong>纬度：</strong>{{ currentWatershed.lat || '—' }}</p>
+            <p><strong>面积：</strong>{{ currentWatershed.area ? currentWatershed.area + ' km²' : '—' }}</p>
+          </div>
+          <div v-else class="info-placeholder">
+            <span style="color: #bbb;">请搜索或点击地图上的流域查看详情</span>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
   </div>
 </template>
 
 <script>
+import axios from 'axios';
+import MapComponent from '@/components/MapComponent.vue';
+
+const API_BASE = ''; // 空字符串，使用相对路径
+
 export default {
   name: 'DataView',
+  components: {
+    MapComponent,
+  },
   data() {
     return {
       searchForm: {
         keyword: '',
-        region: ''
+        region: '',
+        level: null,
       },
-      tableData: [
-        {
-          id: 'WS001',
-          name: '长江上游',
-          region: '长江流域',
-          level: '一级',
-          description: '位于青藏高原至宜昌段，水资源丰富。'
-        },
-        {
-          id: 'WS002',
-          name: '黄河中游',
-          region: '黄河流域',
-          level: '二级',
-          description: '流经黄土高原，泥沙含量大。'
-        },
-        {
-          id: 'WS003',
-          name: '淮河干流',
-          region: '淮河流域',
-          level: '一级',
-          description: '介于长江与黄河之间，是重要的农业区。'
-        }
-      ],
-      allData: [],
-      selectedRows: []     // 存储当前选中的行（对象数组）
+      levelOptions: (() => {
+        const arr = [];
+        for (let i = 2; i <= 14; i += 2) arr.push(i);
+        return arr;
+      })(),
+      tableData: [],
+      currentWatershed: null,
+      loading: false,
+      downloading: false,
+      mapCenter: [116.40769, 39.89945], // 默认中心（首次加载使用，搜索后不再更新）
+      mapMarkers: [],
     };
   },
-  computed: {
-    // 是否全选
-    isAllSelected() {
-      if (this.tableData.length === 0) return false;
-      return this.tableData.every(row => this.isSelected(row));
-    }
-  },
   mounted() {
-    this.allData = [...this.tableData];
+    this.handleSearch();
   },
   methods: {
-    // 判断某一行是否被选中
-    isSelected(row) {
-      return this.selectedRows.some(item => item.id === row.id);
-    },
-    // 切换单行选中状态
-    toggleRow(row) {
-      const index = this.selectedRows.findIndex(item => item.id === row.id);
-      if (index !== -1) {
-        this.selectedRows.splice(index, 1);
-      } else {
-        this.selectedRows.push(row);
+    async handleSearch() {
+      this.loading = true;
+      try {
+        const params = {
+          keyword: this.searchForm.keyword || '',
+          region: this.searchForm.region || '',
+          level: this.searchForm.level || '',
+        };
+        const response = await axios.get(`${API_BASE}/api/watersheds`, { params });
+        this.tableData = response.data;
+        this.currentWatershed = this.tableData.length > 0 ? this.tableData[0] : null;
+        // 更新地图标记
+        this.updateMapMarkers();
+        // 【取消刷新】不再更新地图中心，地图保持在当前视口
+        // 注释掉以下代码：
+        // if (this.currentWatershed && this.currentWatershed.lng && this.currentWatershed.lat) {
+        //   this.mapCenter = [this.currentWatershed.lng, this.currentWatershed.lat];
+        // }
+      } catch (error) {
+        console.error('搜索失败:', error);
+        alert('搜索失败，请检查后端服务是否运行');
+      } finally {
+        this.loading = false;
       }
     },
-    // 切换全选
-    toggleAllSelection(checked) {
-      if (checked) {
-        // 全选：将当前表格所有行加入 selectedRows（去重）
-        const existingIds = new Set(this.selectedRows.map(r => r.id));
-        this.tableData.forEach(row => {
-          if (!existingIds.has(row.id)) {
-            this.selectedRows.push(row);
-          }
-        });
-      } else {
-        // 取消全选：移除当前表格中所有行
-        const currentIds = new Set(this.tableData.map(r => r.id));
-        this.selectedRows = this.selectedRows.filter(r => !currentIds.has(r.id));
-      }
-    },
-    // 搜索
-    handleSearch() {
-      const { keyword, region } = this.searchForm;
-      let filtered = this.allData.filter(item => {
-        let match = true;
-        if (keyword) {
-          const kw = keyword.trim().toLowerCase();
-          match = match && (item.id.toLowerCase().includes(kw) || item.name.toLowerCase().includes(kw));
-        }
-        if (region) {
-          match = match && item.region === region;
-        }
-        return match;
-      });
-      this.tableData = filtered;
-      // 搜索后清空选中状态（因为当前选中可能不在过滤结果中）
-      this.selectedRows = [];
-    },
-    // 重置搜索
+
     resetSearch() {
       this.searchForm.keyword = '';
       this.searchForm.region = '';
-      this.tableData = [...this.allData];
-      this.selectedRows = [];
+      this.searchForm.level = null;
+      this.handleSearch();
     },
-    // 查看详情
-    viewDetail(row) {
-      alert(`查看流域详情：${row.name}（编号：${row.id}）`);
-    },
-    // 下载按钮
-    handleDownload() {
-      if (this.selectedRows.length === 0) {
-        alert('未选择流域，请先勾选需要下载的流域数据！');
+
+    async handleDownload() {
+      if (this.tableData.length === 0) {
+        alert('没有可下载的数据，请先搜索。');
         return;
       }
-      const ids = this.selectedRows.map(r => r.id).join(', ');
-      alert(`准备下载以下流域数据：${ids}\n（实际下载功能待对接后端实现）`);
-    }
-  }
+      const ids = this.tableData.map((row) => row.id);
+      console.log('[前端] 发送的 ids:', ids);
+      this.downloading = true;
+      try {
+        const response = await axios.post(
+          `${API_BASE}/api/download`,
+          { ids },
+          {
+            responseType: 'blob',
+            timeout: 600000,
+          }
+        );
+        const contentDisposition = response.headers['content-disposition'];
+        let filename = 'watershed_data.zip';
+        if (contentDisposition) {
+          const match = contentDisposition.match(/filename="?([^"]+)"?/);
+          if (match) filename = match[1];
+        }
+        const blob = new Blob([response.data]);
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+      } catch (error) {
+        console.error('下载失败:', error);
+        alert('下载失败，请检查后端服务。');
+      } finally {
+        this.downloading = false;
+      }
+    },
+
+    updateMapMarkers() {
+      this.mapMarkers = this.tableData
+        .filter((item) => item.lng && item.lat)
+        .map((item) => ({
+          lng: item.lng,
+          lat: item.lat,
+          id: item.id,
+          name: item.name,
+          region: item.region,
+        }));
+    },
+
+    onMarkerClick(markerData) {
+      const found = this.tableData.find((item) => item.id === markerData.id);
+      if (found) {
+        this.currentWatershed = found;
+      }
+    },
+  },
 };
 </script>
 
 <style scoped>
 #data-view {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 0 20px 40px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
   font-family: 'Helvetica Neue', Arial, sans-serif;
+  background-color: #f5f7fa;
 }
 .search-card {
-  margin-bottom: 20px;
+  margin-bottom: 16px;
+  flex-shrink: 0;
+  border-radius: 0;
 }
 .search-form {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+  padding: 0 10px;
 }
-.table-card {
-  margin-bottom: 20px;
+.main-row {
+  flex: 1;
+  margin: 0 !important;
+  width: 100%;
+  min-height: 0;
+}
+.map-col,
+.info-col {
+  display: flex;
+  flex-direction: column;
 }
 .map-card {
-  margin-bottom: 20px;
+  height: 100%;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
 }
-.map-container {
+.map-card :deep(.el-card__body) {
+  flex: 1;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.map-card :deep(.map-container) {
+  flex: 1;
   width: 100%;
-  height: 400px;
+  min-height: 300px;
   background-color: #f5f7fa;
-  border-radius: 4px;
+}
+.info-card {
+  height: 100%;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+}
+.info-card :deep(.el-card__body) {
+  flex: 1;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.info-content {
+  flex: 1;
+  padding: 15px;
+  overflow-y: auto;
+}
+.info-content p {
+  margin: 8px 0;
+  font-size: 14px;
+  line-height: 1.8;
+  border-bottom: 1px solid #f0f0f0;
+  padding-bottom: 6px;
+}
+.info-content strong {
+  display: inline-block;
+  width: 70px;
+  color: #606266;
+}
+.info-placeholder {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px dashed #dcdfe6;
+  color: #bbb;
+  font-size: 16px;
+}
+@media (max-width: 768px) {
+  .map-card :deep(.map-container) {
+    min-height: 200px;
+  }
+  .info-placeholder {
+    min-height: 150px;
+  }
+  .search-form {
+    padding: 0 5px;
+  }
+  .search-form .el-form-item {
+    margin-bottom: 5px;
+  }
 }
 </style>

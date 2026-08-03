@@ -1,18 +1,14 @@
 <template>
   <div id="app">
-    <!-- ===== 顶部导航栏 ===== -->
     <el-container>
-      <el-header height="70px" class="header">
+      <el-header height="80px" class="header">
         <div class="header-left">
-          <!-- Logo 占位 -->
           <div class="logo">
-            <span style="font-size: 24px; font-weight: bold; color: #2c6b9e;">🌊</span>
-            <span style="font-size: 20px; font-weight: bold; color: #2c6b9e; margin-left: 8px;">流域数据</span>
+            <img src="/new_logo.jpeg" alt="CONCN DataHub" style="height: 60px; vertical-align: middle;" />
           </div>
         </div>
 
         <div class="header-center">
-          <!-- 横向菜单 -->
           <el-menu
             :default-active="activeMenu"
             mode="horizontal"
@@ -34,11 +30,16 @@
 
         <div class="header-right">
           <el-button type="primary" size="small" @click="switchLanguage">English</el-button>
-          <el-button type="primary" size="small" @click="handleLogin">登录/注册</el-button>
+          <el-button v-if="!isLoggedIn" type="primary" size="small" @click="goToLogin">
+            登录/注册
+          </el-button>
+          <template v-else>
+            <span class="username">{{ username }}</span>
+            <el-button type="danger" size="small" @click="handleLogout">退出</el-button>
+          </template>
         </div>
       </el-header>
 
-      <!-- ===== 页面内容区域 ===== -->
       <el-main class="main-content">
         <router-view />
       </el-main>
@@ -51,13 +52,33 @@ export default {
   name: 'App',
   data() {
     return {
-      activeMenu: '/data/view'
+      activeMenu: '/data/view',
+      isLoggedIn: false,
+      username: ''
     };
   },
   mounted() {
+    this.checkLoginStatus();
     this.activeMenu = this.$route.path;
   },
+  watch: {
+    '$route.path'(newPath) {
+      this.activeMenu = newPath;
+    }
+  },
   methods: {
+    checkLoginStatus() {
+      const user = localStorage.getItem('user');
+      if (user) {
+        try {
+          const { username } = JSON.parse(user);
+          this.isLoggedIn = true;
+          this.username = username;
+        } catch (e) {
+          localStorage.removeItem('user');
+        }
+      }
+    },
     handleMenuSelect(index) {
       this.$router.push(index);
       this.activeMenu = index;
@@ -65,17 +86,38 @@ export default {
     switchLanguage() {
       alert('切换语言功能待开发');
     },
-    handleLogin() {
-      alert('登录/注册功能待开发');
-    }
-  },
-  watch: {
-    '$route.path'(newPath) {
-      this.activeMenu = newPath;
+    goToLogin() {
+      this.$router.push('/login');
+    },
+    handleLogout() {
+      localStorage.removeItem('user');
+      this.isLoggedIn = false;
+      this.username = '';
+      this.$message.info('您已退出登录');
+      if (this.$route.path === '/login') {
+        this.$router.push('/');
+      }
     }
   }
 };
 </script>
+
+<style>
+/* 全局样式：确保整个页面占满视口 */
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+#app {
+  height: 100%;
+  font-family: 'Helvetica Neue', Arial, sans-serif;
+}
+.el-container {
+  height: 100%;
+  flex-direction: column;
+}
+</style>
 
 <style scoped>
 * {
@@ -84,72 +126,67 @@ export default {
   box-sizing: border-box;
 }
 
-#app {
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-}
-
-.el-container {
-  min-height: 100vh;
-  flex-direction: column;
-}
-
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   background-color: #ffffff;
   border-bottom: 1px solid #e6e6e6;
-  padding: 0 30px;
+  padding: 0 0;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
   flex-shrink: 0;
+  width: 100%;
+  height: 80px;
 }
-
 .header-left {
   display: flex;
   align-items: center;
   min-width: 160px;
+  padding-left: 20px;
 }
-
 .logo {
   display: flex;
   align-items: center;
 }
-
 .header-center {
-  flex: 1;
+  flex: 2;
   display: flex;
   justify-content: center;
 }
-
 .header-center .el-menu {
   width: 100%;
-  max-width: 600px;
+  max-width: 800px;
   display: flex;
   justify-content: space-around;
 }
-
 .header-right {
   display: flex;
   align-items: center;
   gap: 12px;
   min-width: 180px;
   justify-content: flex-end;
+  padding-right: 20px;
 }
-
+.header-right .username {
+  font-size: 16px;
+  font-weight: 500;
+  color: #333;
+  margin-right: 4px;
+}
 .main-content {
   background-color: #f5f7fa;
-  padding: 20px 40px;
+  padding: 0;
   flex: 1;
+  width: 100%;
+  /* 关键：让 main-content 可收缩，防止溢出 */
+  min-height: 0;
 }
 
-/* ===== 菜单字体放大加粗 ===== */
 :deep(.el-menu-item),
 :deep(.el-sub-menu .el-sub-menu__title) {
   font-size: 20px !important;
   font-weight: bold !important;
 }
-
-/* ===== 右侧按钮变大，字体与菜单一致 ===== */
 :deep(.header-right .el-button) {
   font-size: 20px !important;
   font-weight: bold !important;
