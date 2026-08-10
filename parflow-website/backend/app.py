@@ -6,6 +6,7 @@ from flask_cors import CORS
 from config import Config
 from models import db, Watershed
 from clip_worker import run_clip
+from boundary_service import get_boundaries
 
 def create_app():
     app = Flask(__name__, static_folder=None)
@@ -74,6 +75,12 @@ def create_app():
             import traceback
             traceback.print_exc()
             return jsonify({'error': f'裁剪或打包失败: {str(e)}'}), 500
+
+    # ---------- 流域边界 API ----------
+    @app.route('/api/boundaries', methods=['GET'])
+    def boundaries():
+        """返回流域边界 GeoJSON（按级别或按 id 筛选）"""
+        return get_boundaries()
 
     # ---------- 前端静态文件服务 ----------
     # 修正为你的实际路径
