@@ -1,11 +1,21 @@
 # crop_pfb.py 修正版
-import numpy as np
-import rasterio
-from parflow.tools.io import read_pfb, write_pfb
 import json
 import argparse
 
-def crop_pfb(pfb_path, mask_path, pos_json_path, out_pfb_path, verbose=True):
+def crop_pfb(
+    pfb_path,
+    mask_path,
+    pos_json_path,
+    out_pfb_path,
+    verbose=True,
+    dx=961.72,
+    dy=961.72,
+    dz=200.0,
+):
+    import numpy as np
+    import rasterio
+    from parflow.tools.io import read_pfb, write_pfb
+
     def log(msg):
         if verbose:
             print(f"[程序二] {msg}")
@@ -44,7 +54,7 @@ def crop_pfb(pfb_path, mask_path, pos_json_path, out_pfb_path, verbose=True):
 
     # 确保输出为 float64
     pfb_result = pfb_result.astype(np.float64, copy=False)
-    write_pfb(out_pfb_path, pfb_result,dx=961.72,dy=961.72,dz=200,dist=False)
+    write_pfb(out_pfb_path, pfb_result, dx=dx, dy=dy, dz=dz, dist=False)
     log(f"裁剪后 PFB 已保存: {out_pfb_path}")
     log(f"输出形状: {pfb_result.shape}")
     log(f"非零像素数（流域内）: {np.sum(pfb_result != 0)}")

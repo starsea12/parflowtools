@@ -1,67 +1,62 @@
-import subprocess
+"""执行裁剪任务并将一个或多个流域结果打包。"""
+
+import json
 import sys
+import uuid
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-def run_clip(watershed_ids, output_dir):
-    """
-    调用 run_two.py 裁剪程序，并打包结果
-    """
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from concnshare.run_two import run_basin_clip, validate_basin_code  # noqa: E402
+
+
+def run_clip(watershed_ids, job_root):
+    """顺序裁剪所有流域，在独立任务目录内生成 ZIP 并返回其路径。"""
     if not watershed_ids:
         raise ValueError("流域编号列表为空")
 
-    # 取第一个编码（run_two.py 一次只处理一个）
-    basin_code = str(watershed_ids[0]).strip()
-    print(f"[DEBUG] 传入的流域编码: '{basin_code}', 长度: {len(basin_code)}")
+    basin_codes = []
+    seen = set()
+    for watershed_id in watershed_ids:
+        code = validate_basin_code(watershed_id)
+        if code not in seen:
+            basin_codes.append(code)
+            seen.add(code)
 
-    if len(basin_code) != 14:
-        raise ValueError(f"流域编码长度应为14位，实际为: {len(basin_code)} (内容: '{basin_code}')")
-    if not basin_code.isdigit():
-        raise ValueError(f"流域编码必须为纯数字，实际为: '{basin_code}'")
+    job_id = uuid.uuid4().hex
+    job_dir = Path(job_root) / job_id
+    output_dir = job_dir / "outputs"
+    output_dir.mkdir(parents=True)
 
-    backend_dir = Path(__file__).resolve().parent
-    run_script = backend_dir / 'run_two.py'   # 请确认文件名
+    job_info = {
+        "job_id": job_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "basin_codes": basin_codes,
+        "status": "running",
+    }
+    job_file = job_dir / "job.json"
+    job_file.write_text(json.dumps(job_info, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    if not run_script.exists():
-        raise FileNotFoundError(f"裁剪主程序未找到: {run_script}")
-
-    input_data = f"{basin_code}\n"
-
-    # ★★★ 关键：使用当前环境的 Python（确保与 Flask 环境一致） ★★★
-    # 如果 run_two.py 依赖特殊环境，建议在启动 Flask 前激活对应的 conda 环境
-    result = subprocess.run(
-        [sys.executable, str(run_script)],
-        input=input_data,
-        capture_output=True,
-        text=True,
-        cwd=str(backend_dir)
-    )
-
-    print("=== run_two.py STDOUT ===")
-    print(result.stdout)
-    print("=== run_two.py STDERR ===")
-    print(result.stderr)
-
-    if result.returncode != 0:
-        error_msg = (
-            f"裁剪程序执行失败 (返回码 {result.returncode}):\n"
-            f"STDOUT: {result.stdout}\n"
-            f"STDERR: {result.stderr}"
+    try:
+        result_dirs = [run_basin_clip(code, output_dir) for code in basin_codes]
+        zip_path = job_dir / f"clip_result_{job_id}.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for result_dir in result_dirs:
+                for file_path in result_dir.rglob("*"):
+                    if file_path.is_file():
+                        archive.write(file_path, file_path.relative_to(output_dir))
+        job_info["status"] = "completed"
+        job_info["archive"] = zip_path.name
+        return str(zip_path)
+    except Exception as exc:
+        job_info["status"] = "failed"
+        job_info["error"] = str(exc)
+        raise
+    finally:
+        job_file.write_text(
+            json.dumps(job_info, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        raise RuntimeError(error_msg)
-
-    result_dir = backend_dir / 'outputs' / basin_code
-    if not result_dir.exists():
-        raise RuntimeError(f"裁剪程序未生成预期目录: {result_dir}")
-
-    zip_filename = f"clip_result_{basin_code}.zip"
-    zip_path = Path(output_dir) / zip_filename
-
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for file_path in result_dir.rglob('*'):
-            if file_path.is_file():
-                arcname = file_path.relative_to(result_dir.parent)
-                zf.write(file_path, arcname)
-
-    print(f"[DEBUG] 打包完成: {zip_path} (大小: {zip_path.stat().st_size / 1024:.2f} KB)")
-    return str(zip_path)
