@@ -90,17 +90,61 @@ run_two
 
 按提示输入14位流域编码（如 `01010105000000`）即可开始处理。
 
+也可以直接传入编码；若需要覆盖已有结果，必须显式指定 `--overwrite`：
+
+```bash
+run_two 01010105000000 --output-dir ./outputs
+run_two 01010105000000 --output-dir ./outputs --overwrite
+```
+
 ## 输出文件
 
-- `outputs/mask.tif`：二值掩膜 GeoTIFF
-- `outputs/mask.pfb`：掩膜 PFB 文件
-- `outputs/pos.json`：位置信息
-- `outputs/<流域编码>.vtk` / `outputs/<流域编码>.pfsol`：域文件
-- `outputs/slopex.<流域编码>.pfb` 等：裁剪后的 PFB 文件
+- `outputs/<流域编码>/mask.<流域编码>.tif`：二值掩膜 GeoTIFF
+- `outputs/<流域编码>/mask.<流域编码>.pfb`：掩膜 PFB 文件
+- `outputs/<流域编码>/<流域编码>.vtk` / `.pfsol`：域文件
+- `outputs/<流域编码>/slopex.<流域编码>.pfb` 等：裁剪后的 PFB 文件
+- `outputs/<流域编码>/metadata.json`：流域级别、网格参数和文件清单
 
 ## 环境变量
 
 - `OUTPUT_DIR`：指定输出目录（默认为 `./outputs`）
+- `CONCN_SHP_DIR`：PFBAS Shapefile 目录
+- `CONCN_TIF_DIR`：PFBAS 模板 GeoTIFF 目录
+- `CONCN_INPUT_PFB_DIR`：CONCN 输入 PFB 目录
+- `PARFLOW_PFMASK_CMD`：`pfmask-to-pfsol` 可执行文件
+- `CONCN_DATA_VERSION`：写入输出元数据的数据版本，默认 `1.1`
+
+以上数据路径默认使用当前集群的 `/data/...` 位置，无需额外设置；环境变量主要用于测试或路径升级。
+
+## 网站后端
+
+网站后端复用 `concnshare` 的同一套裁剪逻辑，不再维护重复算法代码。每个下载请求使用独立任务目录，多个流域会逐个裁剪并打入同一个 ZIP。默认单次最多处理 10 个流域，可通过 `CONCN_MAX_BATCH_DOWNLOADS` 调整。
+
+```bash
+cd parflow-website/backend
+python app.py
+```
+
+首次启动会自动创建 SQLite、边界缓存和任务目录。导入正式流域数据时需要显式确认替换，且默认先备份当前数据库：
+
+```bash
+python import_excel.py /path/to/watershed_info.xlsx --replace
+python import_csv.py /path/to/watershed_info.csv --replace
+```
+
+后端相关环境变量：
+
+- `CONCN_JOB_ROOT`：独立下载任务目录
+- `CONCN_MAX_BATCH_DOWNLOADS`：单次批量下载上限，默认 10
+- `CONCN_DIST_DIR`：前端构建产物目录
+- `CONCN_ALLOWED_ORIGINS`：允许访问 API 的前端来源，多个来源用逗号分隔；内测默认 `*`
+- `FLASK_DEBUG`：仅开发调试时设置为 `1`
+
+## 测试
+
+```bash
+python -m unittest discover -s tests
+```
 
 ## 注意事项
 

@@ -35,7 +35,9 @@
           </el-button>
           <template v-else>
             <span class="username">{{ username }}</span>
-            <el-button type="danger" size="small" @click="handleLogout">退出</el-button>
+            <el-button type="primary" size="small" @click="goToUserCenter">用户中心</el-button>
+            <el-button type="primary" size="small" plain class="header-small-btn" @click="goToDownloads">我的下载</el-button>
+            <el-button type="danger" size="small" class="header-small-btn" @click="handleLogout">退出</el-button>
           </template>
         </div>
       </el-header>
@@ -48,6 +50,8 @@
 </template>
 
 <script>
+import axios from 'axios';
+
 export default {
   name: 'App',
   data() {
@@ -64,20 +68,38 @@ export default {
   watch: {
     '$route.path'(newPath) {
       this.activeMenu = newPath;
+      this.syncLoginState();
     }
   },
   methods: {
-    checkLoginStatus() {
-      const user = localStorage.getItem('user');
-      if (user) {
-        try {
-          const { username } = JSON.parse(user);
-          this.isLoggedIn = true;
-          this.username = username;
-        } catch (e) {
-          localStorage.removeItem('user');
-        }
+    syncLoginState() {
+      const token = localStorage.getItem('auth_token');
+      this.isLoggedIn = !!token;
+      this.username = token ? this.getStoredUsername() : '';
+    },
+    getStoredUsername() {
+      try {
+        const user = JSON.parse(localStorage.getItem('auth_user') || '{}');
+        return user.username || '';
+      } catch (e) {
+        return '';
       }
+    },
+    // 启动时用后端校验 token 是否仍有效
+    checkLoginStatus() {
+      this.syncLoginState();
+      if (!this.isLoggedIn) return;
+      axios.get('/api/me')
+        .then(({ data }) => {
+          this.isLoggedIn = true;
+          this.username = data.username;
+          localStorage.setItem('auth_user', JSON.stringify({ username: data.username, email: data.email }));
+        })
+        .catch(() => {
+          // 401 时拦截器已清除本地登录态并跳转登录页
+          this.isLoggedIn = false;
+          this.username = '';
+        });
     },
     handleMenuSelect(index) {
       this.$router.push(index);
@@ -89,14 +111,20 @@ export default {
     goToLogin() {
       this.$router.push('/login');
     },
+    goToUserCenter() {
+      this.$router.push('/profile');
+    },
+    goToDownloads() {
+      this.$router.push('/downloads');
+    },
     handleLogout() {
-      localStorage.removeItem('user');
+      axios.post('/api/logout').catch(() => {});
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('auth_user');
       this.isLoggedIn = false;
       this.username = '';
       this.$message.info('您已退出登录');
-      if (this.$route.path === '/login') {
-        this.$router.push('/');
-      }
+      this.$router.push('/login');
     }
   }
 };
@@ -192,5 +220,11 @@ html, body {
   font-weight: bold !important;
   padding: 14px 28px !important;
   height: auto !important;
+}
+/* 我的下载/退出按钮缩小,不与用户中心等主按钮同样大小 */
+:deep(.header-right .el-button.header-small-btn) {
+  font-size: 14px !important;
+  font-weight: normal !important;
+  padding: 6px 12px !important;
 }
 </style>

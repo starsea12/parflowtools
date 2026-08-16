@@ -1,244 +1,210 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-自动运行程序一（生成掩膜）和程序二（裁剪PFB）
-根据 PFBASID 自动识别对应的 PFBASn.shp 和 PFBASn.tif 文件
-直接调用函数，无需 subprocess
-支持裁剪多个 PFB 文件，输出文件名自动为“核心名称.流域编号.pfb”
-裁剪完成后，将 mask.tif 转换为 mask.pfb，再根据 mask.pfb 生成 VTK 和 PFSOL 文件（按流域编码命名）
-完成后自动删除所有 .dist 文件及 pos.json
-输出文件统一存放在 outputs/<流域编号>/ 目录下
-mask 文件命名为 mask.<流域编号>.tif 和 mask.<流域编号>.pfb
-"""
+"""生成流域掩膜、域文件并裁剪 CONCN PFB 输入。"""
 
+import argparse
+from datetime import datetime, timezone
+import json
 import os
-import sys
+from pathlib import Path
+import shutil
 import subprocess
-import numpy as np
-import rasterio
 
-# 处理相对导入与直接运行的情况
-try:
-    # 作为包的一部分时使用相对导入
-    from .generate_mask import generate_mask
-    from .crop_pfb import crop_pfb
-except ImportError:
-    # 直接运行脚本时使用绝对导入（假设脚本与模块在同一目录）
-    from generate_mask import generate_mask
-    from crop_pfb import crop_pfb
-
-from parflow.tools.io import read_pfb, write_pfb
-
-# ==================== 用户配置 ====================
-SHP_DIR = "/data/share/parflow-group/CONCN_Subbasins_Map/PFBAS/shp"
-TIF_DIR = "/data/share/parflow-group/CONCN_Subbasins_Map/PFBAS/geotiff"
-INPUT_PFB_DIR = "/data/share/parflow-group/CONCN1.1/inputs"
-
-# 输出基础目录：默认当前工作目录下的 outputs，可通过环境变量 OUTPUT_DIR 覆盖
-DEFAULT_BASE_OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
-BASE_OUTPUT_DIR = os.getenv("OUTPUT_DIR", DEFAULT_BASE_OUTPUT_DIR)
-os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
-
-FIELD_NAME = "PFBAS_ID"
-EXPAND = 1
-
-PFMASK_CMD = "/data/software/parflow-gnu13/parflow-3.13.0/bin/pfmask-to-pfsol"
-BOTTOM_PATCH_LABEL = 2
-SIDE_PATCH_LABEL = 3
-Z_TOP = 2000.0
-Z_BOTTOM = 0.0
-
-PFB_INPUTS = [
-    "CHN.slopex.2026.fix.pfb",
-    "CHN.slopey.2026.fix.pfb",
-    "Shangguan_300m_FBZ_fix.pfb",
-    "CONCN_manning.fix.2026.pfb",
-    "GLHYMPS1.0_multi_efold_fix.pfb"
-]
-# ====================================================
+from .config import ClipConfig
 
 
-def ensure_dir(path):
-    if not os.path.exists(path):
-        os.makedirs(path, exist_ok=True)
+OUTPUT_NAMES = {
+    "CHN.slopex.2026.fix.pfb": "slopex",
+    "CHN.slopey.2026.fix.pfb": "slopey",
+    "Shangguan_300m_FBZ_fix.pfb": "bedrock",
+    "CONCN_manning.fix.2026.pfb": "manning",
+    "GLHYMPS1.0_multi_efold_fix.pfb": "subsurface",
+}
+
+
+def validate_basin_code(basin_code):
+    """校验并返回规范化后的 14 位流域编码。"""
+    code = str(basin_code).strip()
+    if len(code) != 14 or not code.isdigit():
+        raise ValueError(f"流域编码必须是14位数字，实际为: {code!r}")
+    return code
 
 
 def get_output_filename(input_filename, basin_code):
-    mapping = {
-        "CHN.slopex.2026.fix.pfb": "slopex",
-        "CHN.slopey.2026.fix.pfb": "slopey",
-        "Shangguan_300m_FBZ_fix.pfb": "Shangguan",
-        "CONCN_manning.fix.2026.pfb": "CONCN_manning",
-        "GLHYMPS1.0_multi_efold_fix.pfb": "GLHYMPS1.0"
-    }
-    base_name = os.path.basename(input_filename)
-    if base_name not in mapping:
-        raise ValueError(f"未定义输出映射规则的文件: {base_name}")
-    core_name = mapping[base_name]
-    return f"{core_name}.{basin_code}.pfb"
+    code = validate_basin_code(basin_code)
+    base_name = Path(input_filename).name
+    try:
+        core_name = OUTPUT_NAMES[base_name]
+    except KeyError as exc:
+        raise ValueError(f"未定义输出映射规则的文件: {base_name}") from exc
+    return f"{core_name}.{code}.pfb"
 
 
 def get_pfbas_level(pfbas_code):
-    code_stripped = pfbas_code.rstrip('0')
-    if not code_stripped:
+    """根据固定 14 位、两位一级的编码推断 PFBAS 级别。"""
+    code = validate_basin_code(pfbas_code)
+    effective_length = len(code.rstrip("0"))
+    if effective_length <= 2:
         return 2
-    level = len(code_stripped)
-    if level % 2 != 0:
-        level += 1
-    if level < 2:
-        level = 2
-    if level > 14:
-        level = 14
-    return level
+    return min(14, effective_length + effective_length % 2)
 
 
-def convert_mask_tif_to_pfb(mask_tif_path, mask_pfb_path):
-    """将 mask.tif 转换为 mask.pfb，保持原值：1=流域内，0=流域外"""
+def _require_file(path, description):
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"{description}不存在: {path}")
+    return path
+
+
+def convert_mask_tif_to_pfb(mask_tif_path, mask_pfb_path, config=None):
+    """将 GeoTIFF 掩膜转换为单层 PFB，保持流域内 1、流域外 0。"""
+    import numpy as np
+    import rasterio
+    from parflow.tools.io import write_pfb
+
+    config = config or ClipConfig()
     with rasterio.open(mask_tif_path) as src:
-        mask_2d = src.read(1).astype(np.uint8)   # 原值：1=内，0=外
-    mask_3d = mask_2d[np.newaxis, :, :].astype(np.float64, order='C', copy=True)
-    write_pfb(mask_pfb_path, mask_3d,dx=961.72,dy=961.72,dz=200,dist=False)
-    print(f"[转换] 掩膜 TIF 已转换为 PFB: {mask_pfb_path} (流域内=1, 流域外=0)")
-
-
-def generate_domain_files(mask_pfb_path, vtk_path, pfsol_path, output_dir):
-    cmd = [
-        PFMASK_CMD,
-        "--mask", mask_pfb_path,
-        "--vtk", vtk_path,
-        "--pfsol", pfsol_path,
-        "--bottom-patch-label", str(BOTTOM_PATCH_LABEL),
-        "--side-patch-label", str(SIDE_PATCH_LABEL),
-        "--z-top", str(Z_TOP),
-        "--z-bottom", str(Z_BOTTOM)
-    ]
-    print(f"\n>>> 生成 VTK 和 PFSOL 文件（调用 pfmask-to-pfsol）")
-    print(f"  执行命令: {' '.join(cmd)}")
-    try:
-        subprocess.run(cmd, check=True, cwd=output_dir,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       text=True)
-        print(f"  成功生成: {vtk_path}\n            {pfsol_path}")
-    except subprocess.CalledProcessError as e:
-        print(f"  错误：命令执行失败，返回码 {e.returncode}")
-        print(f"  错误输出: {e.stderr}")
-        raise
-    except FileNotFoundError:
-        print(f"  错误：找不到命令 '{PFMASK_CMD}'，请检查路径")
-        raise
-
-
-def main():
-    # 1. 输入流域编码
-    pfbas_code = input("请输入14位流域编码（如01010105000000）: ").strip()
-    if len(pfbas_code) != 14 or not pfbas_code.isdigit():
-        print("错误：编码应为14位数字")
-        sys.exit(1)
-
-    # 2. 创建以流域编码命名的输出子目录
-    output_dir = os.path.join(BASE_OUTPUT_DIR, pfbas_code)
-    ensure_dir(output_dir)
-    print(f"[信息] 输出目录: {output_dir}")
-
-    # 3. 前置检查：所有 PFB 输入文件是否存在
-    missing_files = []
-    for input_file in PFB_INPUTS:
-        input_path = os.path.join(INPUT_PFB_DIR, input_file)
-        if not os.path.exists(input_path):
-            missing_files.append(input_path)
-    if missing_files:
-        print("错误：以下必需的输入 PFB 文件不存在，无法继续：")
-        for f in missing_files:
-            print(f"  {f}")
-        sys.exit(1)
-    print("[信息] 所有必需的 PFB 输入文件均存在。")
-
-    # 4. 根据编码获取 Shapefile 和模板 TIF 路径
-    level = get_pfbas_level(pfbas_code)
-    print(f"[信息] 流域编码: {pfbas_code}")
-
-    shp_path = os.path.join(SHP_DIR, f"PFBAS{level}.shp")
-    tif_template = os.path.join(TIF_DIR, f"PFBAS{level}.tif")
-
-    if not os.path.exists(shp_path):
-        print(f"错误：找不到 Shapefile 文件 {shp_path}")
-        sys.exit(1)
-    if not os.path.exists(tif_template):
-        print(f"错误：找不到模板 TIF 文件 {tif_template}")
-        sys.exit(1)
-
-    # 5. 定义输出文件路径（均在子目录内）
-    mask_tif = os.path.join(output_dir, f"mask.{pfbas_code}.tif")
-    mask_pfb = os.path.join(output_dir, f"mask.{pfbas_code}.pfb")
-    pos_json = os.path.join(output_dir, f"pos.json")   # 保留 pos.json 名字，稍后删除
-    out_vtk = os.path.join(output_dir, f"{pfbas_code}.vtk")
-    out_pfsol = os.path.join(output_dir, f"{pfbas_code}.pfsol")
-
-    # 6. 生成掩膜 TIF（程序一）
-    print("\n>>> 程序一：生成掩膜和位置信息")
-    generate_mask(
-        shp_path=shp_path,
-        code=pfbas_code,
-        field=FIELD_NAME,
-        tif_path=tif_template,
-        out_mask_path=mask_tif,
-        out_json_path=pos_json,
-        expand=EXPAND,
-        verbose=True
+        mask_2d = src.read(1).astype(np.uint8)
+    mask_3d = mask_2d[np.newaxis, ::-1, :].astype(np.float64, order="C", copy=True)
+    write_pfb(
+        str(mask_pfb_path),
+        mask_3d,
+        dx=config.dx,
+        dy=config.dy,
+        dz=config.dz,
+        dist=False,
     )
 
-    # 7. 转换掩膜 TIF 到 PFB（保持内1外0）
-    print("\n>>> 转换掩膜：将 mask.tif 转换为 mask.pfb（保持内1外0）")
-    convert_mask_tif_to_pfb(mask_tif, mask_pfb)
 
-    # 8. 生成 VTK 和 PFSOL
-    generate_domain_files(mask_pfb, out_vtk, out_pfsol, output_dir)
+def generate_domain_files(mask_pfb_path, vtk_path, pfsol_path, output_dir, config=None):
+    """调用 ParFlow 的 pfmask-to-pfsol 生成 VTK 和 PFSOL。"""
+    config = config or ClipConfig()
+    _require_file(config.pfmask_cmd, "pfmask-to-pfsol 可执行文件")
+    cmd = [
+        str(config.pfmask_cmd),
+        "--mask", str(mask_pfb_path),
+        "--vtk", str(vtk_path),
+        "--pfsol", str(pfsol_path),
+        "--bottom-patch-label", str(config.bottom_patch_label),
+        "--side-patch-label", str(config.side_patch_label),
+        "--z-top", str(config.z_top),
+        "--z-bottom", str(config.z_bottom),
+    ]
+    subprocess.run(
+        cmd,
+        check=True,
+        cwd=str(output_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
-    # 9. 裁剪所有 PFB 文件
-    print("\n>>> 程序二：裁剪 PFB 文件")
-    for input_file in PFB_INPUTS:
-        input_path = os.path.join(INPUT_PFB_DIR, input_file)
-        output_file = get_output_filename(input_path, pfbas_code)
-        output_path = os.path.join(output_dir, output_file)
 
-        print(f"\n裁剪 {input_file} -> {output_file}")
-        # 这里文件已经在前面检查过存在性，无需再检查，但保留防御
-        if not os.path.exists(input_path):
-            print(f"警告：找不到输入文件 {input_path}，跳过（不应发生）")
-            continue
+def run_basin_clip(basin_code, base_output_dir, config=None, overwrite=False, verbose=True):
+    """运行一个流域的完整裁剪流程并返回输出目录。"""
+    from .crop_pfb import crop_pfb
+    from .generate_mask import generate_mask
 
+    config = config or ClipConfig()
+    code = validate_basin_code(basin_code)
+    base_output_dir = Path(base_output_dir).resolve()
+    output_dir = base_output_dir / code
+
+    if output_dir.exists():
+        if not overwrite:
+            raise FileExistsError(f"输出目录已存在，拒绝覆盖: {output_dir}")
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+
+    input_paths = [
+        _require_file(config.input_pfb_dir / name, "输入 PFB 文件")
+        for name in config.pfb_inputs
+    ]
+    level = get_pfbas_level(code)
+    shp_path = _require_file(config.shp_dir / f"PFBAS{level}.shp", "Shapefile")
+    tif_template = _require_file(config.tif_dir / f"PFBAS{level}.tif", "模板 GeoTIFF")
+
+    mask_tif = output_dir / f"mask.{code}.tif"
+    mask_pfb = output_dir / f"mask.{code}.pfb"
+    pos_json = output_dir / "pos.json"
+    out_vtk = output_dir / f"{code}.vtk"
+    out_pfsol = output_dir / f"{code}.pfsol"
+
+    if verbose:
+        print(f"[信息] 流域编码: {code}，级别: PFBAS{level}")
+        print(f"[信息] 输出目录: {output_dir}")
+
+    generate_mask(
+        shp_path=str(shp_path),
+        code=code,
+        field=config.field_name,
+        tif_path=str(tif_template),
+        out_mask_path=str(mask_tif),
+        out_json_path=str(pos_json),
+        expand=config.expand,
+        verbose=verbose,
+    )
+    convert_mask_tif_to_pfb(mask_tif, mask_pfb, config)
+    generate_domain_files(mask_pfb, out_vtk, out_pfsol, output_dir, config)
+
+    cropped_files = []
+    for input_path in input_paths:
+        output_path = output_dir / get_output_filename(input_path.name, code)
         crop_pfb(
-            pfb_path=input_path,
-            mask_path=mask_tif,
-            pos_json_path=pos_json,
-            out_pfb_path=output_path,
-            verbose=True
+            pfb_path=str(input_path),
+            mask_path=str(mask_tif),
+            pos_json_path=str(pos_json),
+            out_pfb_path=str(output_path),
+            verbose=verbose,
+            dx=config.dx,
+            dy=config.dy,
+            dz=config.dz,
         )
+        cropped_files.append(output_path.name)
 
-    # 10. 清理 .dist 文件和 pos.json
-    dist_files = [f for f in os.listdir(output_dir) if f.endswith('.dist')]
-    for f in dist_files:
-        os.remove(os.path.join(output_dir, f))
-    if dist_files:
-        print(f"已清理 {len(dist_files)} 个 .dist 文件")
-    else:
-        print("没有 .dist 文件需要清理")
+    for dist_file in output_dir.glob("*.dist"):
+        dist_file.unlink()
+    pos_json.unlink(missing_ok=True)
 
-    if os.path.exists(pos_json):
-        os.remove(pos_json)
-        print("已删除 pos.json 文件")
-    else:
-        print("pos.json 文件不存在，无需删除")
+    metadata = {
+        "basin_code": code,
+        "pfbas_level": level,
+        "concn_data_version": config.data_version,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "grid": {"dx": config.dx, "dy": config.dy, "dz": config.dz},
+        "files": {
+            "mask_tif": mask_tif.name,
+            "mask_pfb": mask_pfb.name,
+            "vtk": out_vtk.name,
+            "pfsol": out_pfsol.name,
+            "cropped_pfb": cropped_files,
+        },
+    }
+    (output_dir / "metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return output_dir
 
-    # 11. 完成报告
-    print("\n=== 全部完成 ===")
-    print(f"掩膜 TIF: {mask_tif}")
-    print(f"掩膜 PFB: {mask_pfb}")
-    print(f"VTK 文件: {out_vtk}")
-    print(f"PFSOL 文件: {out_pfsol}")
-    for input_file in PFB_INPUTS:
-        output_file = get_output_filename(input_file, pfbas_code)
-        print(f"裁剪结果: {os.path.join(output_dir, output_file)}")
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="裁剪指定 CONCN 流域的 ParFlow 输入")
+    parser.add_argument("basin_code", nargs="?", help="14位流域编码")
+    parser.add_argument(
+        "--output-dir",
+        default=os.getenv("OUTPUT_DIR", str(Path.cwd() / "outputs")),
+        help="输出基础目录，默认 $OUTPUT_DIR 或 ./outputs",
+    )
+    parser.add_argument("--overwrite", action="store_true", help="覆盖已有流域输出目录")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    code = args.basin_code or input("请输入14位流域编码（如01010105000000）: ").strip()
+    try:
+        output_dir = run_basin_clip(code, args.output_dir, overwrite=args.overwrite)
+    except (ValueError, FileNotFoundError, FileExistsError) as exc:
+        raise SystemExit(f"错误：{exc}") from exc
+    print(f"\n=== 全部完成 ===\n输出目录: {output_dir}")
 
 
 if __name__ == "__main__":

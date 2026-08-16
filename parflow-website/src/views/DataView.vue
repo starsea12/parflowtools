@@ -11,19 +11,6 @@
             style="width: 220px;"
           />
         </el-form-item>
-        <el-form-item label="所属地区">
-          <el-select
-            v-model="searchForm.region"
-            placeholder="请选择地区"
-            clearable
-            style="width: 160px;"
-          >
-            <el-option label="长江流域" value="长江流域" />
-            <el-option label="黄河流域" value="黄河流域" />
-            <el-option label="淮河流域" value="淮河流域" />
-            <el-option label="海河流域" value="海河流域" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="流域级别">
           <el-select
             v-model="searchForm.level"
@@ -125,7 +112,6 @@ export default {
     return {
       searchForm: {
         keyword: '',
-        region: '',
         level: null,
       },
       levelOptions: (() => {
@@ -137,6 +123,7 @@ export default {
       currentWatershed: null,
       loading: false,
       downloading: false,
+      maxBatchDownloads: 10,
       mapCenter: [116.40769, 39.89945], // 默认中心（首次加载使用，搜索后不再更新）
       // 流域边界
       boundaryData: null,      // 当前显示的全量边界 GeoJSON
@@ -148,6 +135,7 @@ export default {
     };
   },
   mounted() {
+    this.loadRuntimeConfig();
     // 默认显示第 2 级流域边界（触发 watcher → loadBoundaries(2)）
     // 不做自动搜索: 不产生高亮 → 所有级别默认都是蓝色，点击"搜索"后才橙色
     if (!this.searchForm.level) {
@@ -183,18 +171,27 @@ export default {
     },
   },
   methods: {
+    async loadRuntimeConfig() {
+      try {
+        const response = await axios.get(`${API_BASE}/api/config`);
+        const limit = Number(response.data.maxBatchDownloads);
+        if (Number.isInteger(limit) && limit > 0) this.maxBatchDownloads = limit;
+      } catch (error) {
+        console.warn('未能加载后端配置，使用默认批量下载上限:', error);
+      }
+    },
+
     async handleSearch() {
       this.loading = true;
       try {
         const keyword = (this.searchForm.keyword || '').trim();
-        const region = this.searchForm.region || '';
-        // 没有任何搜索条件（空搜索会命中全部 7 万流域 → 全量高亮 + 跳级别）:
+        // 空搜索会命中全部 7 万流域 → 全量高亮 + 跳级别:
         // 拦截并保持当前视图, 不搜索、不高亮、不跳转
-        if (!keyword && !region) {
+        if (!keyword) {
           this.tableData = [];
           this.currentWatershed = null;
           this.highlightIds = [];
-          this.$message.info('请输入流域编号/名称, 或选择所属地区后再搜索');
+          this.$message.info('请输入流域编号/名称后再搜索');
           return;
         }
         // 注意: 不传 level 过滤 —— 搜索框级别仅用于控制地图显示的边界级别,
@@ -202,7 +199,6 @@ export default {
         // 若带 level 过滤, 搜索与当前级别不同的流域会被后端直接过滤掉, 搜不到。
         const params = {
           keyword,
-          region,
         };
         const response = await axios.get(`${API_BASE}/api/watersheds`, { params });
         this.tableData = response.data;
@@ -226,7 +222,6 @@ export default {
     resetSearch() {
       // 重置: 清空搜索条件与结果, 边界随 level=null 由 watcher 清空(loadBoundaries(null) 会清高亮)
       this.searchForm.keyword = '';
-      this.searchForm.region = '';
       this.searchForm.level = null;
       this.tableData = [];
       this.currentWatershed = null;
@@ -235,6 +230,12 @@ export default {
     async handleDownload() {
       if (this.tableData.length === 0) {
         alert('没有可下载的数据，请先搜索。');
+        return;
+      }
+      if (this.tableData.length > this.maxBatchDownloads) {
+        this.$message.warning(
+          `搜索结果共 ${this.tableData.length} 个，单次最多下载 ${this.maxBatchDownloads} 个，请缩小搜索范围。`
+        );
         return;
       }
       await this.downloadByIds(this.tableData.map((row) => row.id));
@@ -279,7 +280,16 @@ export default {
         window.URL.revokeObjectURL(url);
       } catch (error) {
         console.error('下载失败:', error);
-        alert('下载失败，请检查后端服务。');
+        let message = '下载失败，请检查后端服务。';
+        if (error.response?.data instanceof Blob) {
+          try {
+            const payload = JSON.parse(await error.response.data.text());
+            if (payload.error) message = payload.error;
+          } catch (_) {
+            // 非 JSON 错误响应，保留通用提示
+          }
+        }
+        this.$message.error(message);
       } finally {
         this.downloading = false;
       }
@@ -305,6 +315,15 @@ export default {
         this.boundaryData = response.data;
         // 建立 "流域 id → 包围盒" 索引，供信息栏显示经纬度范围
         this.bboxMap = this._buildBBoxMap(response.data);
+        // 搜索命中流域时,搜索请求发生在旧级别边界的 bboxMap 上查不到范围;
+        // 级别切换、新边界加载完成后,这里重新附加一次,信息栏的经纬度范围才显示。
+        // 只在查到新 bbox 时刷新(查不到说明当前流域不属于新级别,保留原有显示)。
+        if (this.currentWatershed) {
+          const refreshed = this._attachBBox(this.currentWatershed);
+          if (refreshed.bbox) {
+            this.currentWatershed = refreshed;
+          }
+        }
       } catch (error) {
         console.error('加载边界失败:', error);
         this.$message.error('加载流域边界失败，请检查后端服务');

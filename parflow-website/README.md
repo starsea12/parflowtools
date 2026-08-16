@@ -1,38 +1,56 @@
-# parflow website
+# CONCN DataHub 网站
 
-This template should help get you started developing with Vue 3 in Vite.
+Vue 3 前端和 Flask 后端，共用仓库根目录的 `concnshare` 裁剪包。
 
-## Recommended IDE Setup
+## 前端开发
 
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
+需要 Node.js 22.18+：
 
-## Recommended Browser Setup
-
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
-
-## Customize configuration
-
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
-
-```sh
+```bash
 npm install
-```
-
-### Compile and Hot-Reload for Development
-
-```sh
 npm run dev
 ```
 
-### Compile and Minify for Production
+开发服务器会将 `/api` 代理到 `http://localhost:50001`。
 
-```sh
-npm run build
+## 后端开发
+
+先在仓库根目录创建并激活 `concnshare` Conda 环境，然后运行：
+
+```bash
+cd parflow-website/backend
+pip install -r requirements.txt
+python app.py
 ```
+
+首次启动会自动创建：
+
+- `backend/instance/watershed.db`
+- `backend/boundary_cache/`
+- `backend/jobs/`
+
+每个下载请求会在 `jobs/<job_id>/` 中保存独立的状态、输出和 ZIP，不会与其他请求共用结果目录。
+
+## 导入流域信息
+
+导入前会先完整校验文件，并默认备份当前 SQLite 数据库。只有显式传入 `--replace` 才会替换现有记录：
+
+```bash
+python import_excel.py /path/to/watershed_info.xlsx --replace
+python import_csv.py /path/to/watershed_info.csv --replace
+```
+
+## 环境变量
+
+集群路径都有当前服务器默认值，通常无需设置：
+
+- `CONCN_SHP_DIR`
+- `CONCN_TIF_DIR`
+- `CONCN_INPUT_PFB_DIR`
+- `PARFLOW_PFMASK_CMD`
+- `CONCN_DATA_VERSION`，默认 `1.1`
+- `CONCN_DIST_DIR`
+- `CONCN_JOB_ROOT`
+- `CONCN_MAX_BATCH_DOWNLOADS`，默认 `10`
+- `CONCN_ALLOWED_ORIGINS`，多个来源用逗号分隔，内测默认 `*`
+- `FLASK_DEBUG`，仅开发调试时设置为 `1`

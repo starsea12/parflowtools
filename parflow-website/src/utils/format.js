@@ -32,5 +32,5 @@ export function formatArea(area) {
   if (area === null || area === undefined || area === '' || isNaN(Number(area))) {
     return '';
   }
-  return Number(area).toFixed(2);
+  return `${Number(area).toFixed(2)} km²`;
 }
