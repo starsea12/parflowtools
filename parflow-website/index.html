@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CONCN DataHub</title>
 
-    <!-- 引入天地图 API（v4.0） -->
-    <!-- 请将 "你的Key" 替换为你在天地图官网申请的浏览器端密钥 -->
-    <script src="http://api.tianditu.gov.cn/api?v=4.0&tk=1d53336bcd00cb17850b2653b8257d7c"></script>
+    <!-- 天地图 API（v4.0）不在此同步引入: 同步第三方脚本会阻塞首屏,
+         且 http 地址在 HTTPS 部署下会被浏览器按混合内容拦截。
+         改由 MapComponent 动态加载（https 优先、http 兜底、失败显示提示并可重试） -->
 
     <style>
       /* 全局样式重置，确保页面占满视口 */

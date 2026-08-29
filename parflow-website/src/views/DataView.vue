@@ -93,12 +93,21 @@
       class="info-restore-btn"
       @click="infoPanelVisible = true"
     >流域信息 ▸</button>
+
+    <!-- 下载用途 / 受限申请弹窗（每次下载必填用途） -->
+    <DownloadDialogs
+      v-model:visible="downloadGate"
+      :ids="pendingIds"
+      :reason="pendingReason"
+      @confirm-download="(reason, institution) => doDownload(pendingIds, reason, institution)"
+    />
   </div>
 </template>
 
 <script>
 import axios from 'axios';
 import MapComponent from '@/components/MapComponent.vue';
+import DownloadDialogs from '@/components/DownloadDialogs.vue';
 import { formatBBox, formatArea } from '@/utils/format';
 
 const API_BASE = ''; // 空字符串，使用相对路径
@@ -107,6 +116,7 @@ export default {
   name: 'DataView',
   components: {
     MapComponent,
+    DownloadDialogs,
   },
   data() {
     return {
@@ -129,9 +139,13 @@ export default {
       boundaryData: null,      // 当前显示的全量边界 GeoJSON
       boundaryLevel: null,     // 当前加载的边界级别
       highlightIds: [],        // 搜索命中的流域 id（用于高亮）
-      pendingFocus: null,      // 搜索后待定位的流域 { lng, lat, level }（等边界加载完成后执行）
+      pendingFocus: null,      // 搜索后待定位的流域 { lng, lat, level, bbox }（等边界加载完成后执行）
       infoPanelVisible: true,  // 右侧流域信息栏是否展开（折叠后地图占满，显示恢复按钮）
+      boundaryLoading: false,  // 边界请求在途标记（防止搜索定位与级别 watcher 重复触发加载）
       bboxMap: {},             // 流域 id → 包围盒 {minLng,minLat,maxLng,maxLat}（从已加载边界 GeoJSON 建立）
+      downloadGate: '',        // 下载弹窗状态: ''(隐藏) | 'reason'(填写用途) | 'apply'(受限申请)
+      pendingIds: [],          // 等待填写用途/被拦申请时暂存的流域 id
+      pendingReason: '',       // 填写的下载用途(被拦时预填进申请弹窗)
     };
   },
   mounted() {
@@ -194,6 +208,15 @@ export default {
           this.$message.info('请输入流域编号/名称后再搜索');
           return;
         }
+        // 输入合法性检测: 纯数字输入按"流域编号"处理, 流域编号固定 14 位。
+        // 位数不足/超出直接拦截, 不发起搜索（避免无谓的后端请求）
+        const isNumericId = /^\d+$/.test(keyword);
+        if (isNumericId && keyword.length !== 14) {
+          this.$message.warning(
+            `流域编号需为 14 位数字（当前输入 ${keyword.length} 位），请核对后重新输入`
+          );
+          return;
+        }
         // 注意: 不传 level 过滤 —— 搜索框级别仅用于控制地图显示的边界级别,
         // 搜索结果命中后会自动切换到该流域的级别（见 focusOnSearchResult）。
         // 若带 level 过滤, 搜索与当前级别不同的流域会被后端直接过滤掉, 搜不到。
@@ -202,15 +225,51 @@ export default {
         };
         const response = await axios.get(`${API_BASE}/api/watersheds`, { params });
         this.tableData = response.data;
-        this.currentWatershed = this.tableData.length > 0 ? this._attachBBox(this.tableData[0]) : null;
+        const first = this.tableData.length > 0 ? this.tableData[0] : null;
+        // 同级别边界已加载时 bboxMap 立即命中 → 范围马上显示;
+        // 跨级别搜索时目标级别还没加载, bbox 先为 null, 下面按 id 单独拉取补齐
+        this.currentWatershed = first ? this._attachBBox(first) : null;
         // 更新搜索命中高亮
         this.updateHighlightIds();
-        // 如果已加载边界但搜索结果为空，保留当前边界显示
-        if (this.tableData.length === 0 && this.boundaryData) {
-          this.highlightIds = [];
+        if (!first) {
+          // 无结果: 保留当前边界显示, 并礼貌提示（14 位编号查不到 = 该流域不存在）
+          if (this.boundaryData) this.highlightIds = [];
+          this.$message.warning(
+            isNumericId
+              ? `抱歉，未找到编号为 ${keyword} 的流域，请确认编号是否正确`
+              : `抱歉，未找到与“${keyword}”相关的流域，请尝试其他关键词`
+          );
+          return;
         }
-        // 搜索到流域：切换到该流域的级别，并把流域移到地图中央
-        this.focusOnSearchResult();
+
+        const level = first.level;
+        // 级别不同 → 立即切换(触发 watcher 加载目标级别边界), 与下面的 bbox 拉取并行,
+        // 先切换能让全量边界尽快开始加载
+        if (level && this.searchForm.level !== level) {
+          this.searchForm.level = level;
+        }
+
+        // 搜索到流域: 保证"经纬度范围"一定显示 —— 直接按 id 拉取该流域的边界并计算
+        // 包围盒, 与"级别切换后全量加载 + 重建 bboxMap"解耦(此前出现过搜索后范围
+        // 不显示、需再次点击才显示的问题)
+        let bbox = this.currentWatershed ? this.currentWatershed.bbox : null;
+        if (!bbox) {
+          bbox = await this._fetchWatershedBBox(first.id, level);
+          if (bbox) {
+            this.currentWatershed = { ...this.currentWatershed, bbox };
+          }
+        }
+
+        // 定位: 优先用边界包围盒中心(经纬度)。服务器库里的经度/纬度字段是投影米制
+        // 坐标, 不能直接用于地图定位(会把地图飞到空白处); 只有在 bbox 拉取失败时
+        // 才退回用库里的经纬度(focusOnSearchResult 内部会校验合法性)
+        let focusLng = first.lng;
+        let focusLat = first.lat;
+        if (bbox) {
+          focusLng = (bbox.minLng + bbox.maxLng) / 2;
+          focusLat = (bbox.minLat + bbox.maxLat) / 2;
+        }
+        this.focusOnSearchResult(focusLng, focusLat, level, bbox);
       } catch (error) {
         console.error('搜索失败:', error);
         alert('搜索失败，请检查后端服务是否运行');
@@ -250,14 +309,21 @@ export default {
       await this.downloadByIds([this.currentWatershed.id]);
     },
 
-    // 按 id 列表下载数据（打包 zip 并触发浏览器保存）
+    // 按 id 列表下载数据:先弹窗填写下载用途,确认后再发起下载
     async downloadByIds(ids) {
-      console.log('[前端] 发送的 ids:', ids);
+      this.pendingIds = ids;
+      this.pendingReason = '';
+      this.downloadGate = 'reason';
+    },
+
+    // 填写用途确认后实际发起下载（打包 zip 并触发浏览器保存）
+    async doDownload(ids, reason, institution) {
+      console.log('[前端] 发送的 ids:', ids, '用途:', reason, '单位:', institution);
       this.downloading = true;
       try {
         const response = await axios.post(
           `${API_BASE}/api/download`,
-          { ids },
+          { ids, reason, institution },
           {
             responseType: 'blob',
             timeout: 600000,
@@ -281,13 +347,20 @@ export default {
       } catch (error) {
         console.error('下载失败:', error);
         let message = '下载失败，请检查后端服务。';
+        let errorType = '';
         if (error.response?.data instanceof Blob) {
           try {
             const payload = JSON.parse(await error.response.data.text());
             if (payload.error) message = payload.error;
+            if (payload.error_type) errorType = payload.error_type;
           } catch (_) {
             // 非 JSON 错误响应，保留通用提示
           }
+        }
+        // 超限/级别受限:提示并引导提交申请(用途自动带入申请弹窗)
+        if (errorType === 'quota_exceeded' || errorType === 'level_restricted') {
+          this.pendingReason = reason;
+          this.downloadGate = 'apply';
         }
         this.$message.error(message);
       } finally {
@@ -307,6 +380,7 @@ export default {
       // 所有级别均全量加载（10/12/14 级已由后端简化；前端分批渲染防卡顿）
       this.boundaryData = null;
       this.boundaryLevel = level;
+      this.boundaryLoading = true;
       try {
         const response = await axios.get(`${API_BASE}/api/boundaries`, {
           params: { level },
@@ -328,6 +402,8 @@ export default {
         console.error('加载边界失败:', error);
         this.$message.error('加载流域边界失败，请检查后端服务');
         this.boundaryData = null;
+      } finally {
+        this.boundaryLoading = false;
       }
       // 边界就绪后执行搜索跳转的待定定位（放在边界加载完成后，避免被自动缩放视野覆盖）
       this._flushPendingFocus();
@@ -370,35 +446,84 @@ export default {
       return { ...w, bbox: this.bboxMap[String(w.id)] || null };
     },
 
-    // 搜索到流域后：切换边界级别并定位到该流域（地图中央）
-    focusOnSearchResult() {
-      const target = this.currentWatershed;
-      if (!target || !target.lng || !target.lat) return;
-      if (target.level && this.searchForm.level !== target.level) {
-        // 级别不同：记录待定位，切换级别会触发 loadBoundaries，加载完成后自动定位
-        this.pendingFocus = { lng: target.lng, lat: target.lat, level: target.level };
-        this.searchForm.level = target.level;
-      } else if (this.boundaryLevel !== target.level) {
-        // 级别相同但该级别边界还没加载过：直接加载后再定位
-        this.pendingFocus = { lng: target.lng, lat: target.lat, level: target.level };
-        this.loadBoundaries(target.level);
-      } else {
-        // 边界已就绪：直接定位
-        this._focusWatershed(target);
+    // 按 id 拉取单个流域的边界并计算包围盒（与级别全量加载/bboxMap 解耦，
+    // 搜索目标级别还没加载时也能拿到范围）。服务器按级别解析缓存文件（14 级约数秒）。
+    // 失败返回 null（信息栏范围留空，不影响其他功能）
+    async _fetchWatershedBBox(id, level) {
+      if (!id || !level) return null;
+      try {
+        const response = await axios.get(`${API_BASE}/api/boundaries`, {
+          params: { level, ids: String(id) },
+          timeout: 120000,
+        });
+        const data = response.data;
+        if (!data || !data.features || !data.features.length) return null;
+        let minLng = Infinity;
+        let minLat = Infinity;
+        let maxLng = -Infinity;
+        let maxLat = -Infinity;
+        const walk = (coords) => {
+          if (typeof coords[0] === 'number') {
+            if (coords[0] < minLng) minLng = coords[0];
+            if (coords[1] < minLat) minLat = coords[1];
+            if (coords[0] > maxLng) maxLng = coords[0];
+            if (coords[1] > maxLat) maxLat = coords[1];
+          } else {
+            coords.forEach(walk);
+          }
+        };
+        data.features.forEach((feature) => {
+          if (feature.geometry) walk(feature.geometry.coordinates);
+        });
+        if (minLng === Infinity) return null;
+        return { minLng, minLat, maxLng, maxLat };
+      } catch (error) {
+        console.warn('拉取流域边界范围失败:', error);
+        return null;
       }
     },
 
-    // 执行待定的流域定位
+    // 搜索到流域后：把流域移到地图中央。
+    // focusLng/focusLat 已由 handleSearch 用边界包围盒中心(经纬度)算好;
+    // 服务器库的经度/纬度是投影米制坐标, 若 bbox 拉取失败退回用它们时,
+    // 这里校验合法性(超出 ±180/±90 视为非法, 不定位, 避免地图飞到空白处)
+    focusOnSearchResult(focusLng, focusLat, level, bbox) {
+      if (
+        focusLng === undefined ||
+        focusLng === null ||
+        focusLat === undefined ||
+        focusLat === null ||
+        Math.abs(focusLng) > 180 ||
+        Math.abs(focusLat) > 90
+      ) {
+        return;
+      }
+      if (level && this.boundaryLevel === level && this.boundaryData) {
+        // 边界已就绪：直接定位
+        this._focusWatershed({ lng: focusLng, lat: focusLat, level, bbox });
+      } else {
+        // 边界还在加载（或该级别从未加载/加载失败）：记录待定位，loadBoundaries 完成后自动执行
+        this.pendingFocus = { lng: focusLng, lat: focusLat, level, bbox };
+        // 没有在途请求时触发加载（级别切换已由 watcher 触发的加载正在跑时不再重复触发）
+        if (level && !this.boundaryLoading) {
+          this.loadBoundaries(level);
+        }
+      }
+    },
+
+    // 执行待定的流域定位。
+    // 注意: 必须把 bbox 一起透传 —— 曾因这里只解构 lng/lat/level 丢了 bbox,
+    // 跨级别搜索时定位退化成"按级别固定 zoom 居中", 大流域会有一部分在地图外
     _flushPendingFocus() {
       if (!this.pendingFocus) return;
-      const { lng, lat, level } = this.pendingFocus;
+      const { lng, lat, level, bbox } = this.pendingFocus;
       this.pendingFocus = null;
-      this.$nextTick(() => this._focusWatershed({ lng, lat, level }));
+      this.$nextTick(() => this._focusWatershed({ lng, lat, level, bbox }));
     },
 
     _focusWatershed(w) {
       if (this.$refs.mapComponent && w.lng !== undefined && w.lat !== undefined) {
-        this.$refs.mapComponent.focusWatershed(w.lng, w.lat, w.level);
+        this.$refs.mapComponent.focusWatershed(w.lng, w.lat, w.level, w.bbox);
       }
     },
 
@@ -421,7 +546,13 @@ export default {
       this.infoPanelVisible = true;
       try {
         const response = await axios.get(`${API_BASE}/api/watersheds/${id}`);
-        this.currentWatershed = this._attachBBox(response.data);
+        let watershed = this._attachBBox(response.data);
+        // bboxMap 查不到(数据异常等)时兜底: 按 id 单独拉取边界算包围盒
+        if (!watershed.bbox) {
+          const bbox = await this._fetchWatershedBBox(watershed.id, watershed.level);
+          if (bbox) watershed = { ...watershed, bbox };
+        }
+        this.currentWatershed = watershed;
       } catch (error) {
         console.error('获取流域详情失败:', error);
         if (error.response && error.response.status === 404) {
