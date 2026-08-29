@@ -29,15 +29,28 @@
         </div>
 
         <div class="header-right">
-          <el-button type="primary" size="small" @click="switchLanguage">English</el-button>
           <el-button v-if="!isLoggedIn" type="primary" size="small" @click="goToLogin">
             登录/注册
           </el-button>
           <template v-else>
-            <span class="username">{{ username }}</span>
-            <el-button type="primary" size="small" @click="goToUserCenter">用户中心</el-button>
-            <el-button type="primary" size="small" plain class="header-small-btn" @click="goToDownloads">我的下载</el-button>
-            <el-button type="danger" size="small" class="header-small-btn" @click="handleLogout">退出</el-button>
+            <!-- 用户中心下拉: 按钮显示用户名, 功能入口(我的下载/用户中心各 tab/退出)都在菜单里 -->
+            <el-dropdown trigger="click" @command="handleUserMenu">
+              <el-badge :value="unreadCount" :hidden="unreadCount === 0" class="notify-badge">
+                <span class="username-btn">{{ username }}<span class="caret">▾</span></span>
+              </el-badge>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="downloads">我的下载</el-dropdown-item>
+                  <el-dropdown-item command="profile:basic">用户中心</el-dropdown-item>
+                  <el-dropdown-item command="profile:applications">我的申请</el-dropdown-item>
+                  <el-dropdown-item command="profile:notify">通知</el-dropdown-item>
+                  <el-dropdown-item v-if="isAdmin" command="profile:admin-users" divided>用户管理</el-dropdown-item>
+                  <el-dropdown-item v-if="isAdmin" command="profile:admin-downloads">下载记录</el-dropdown-item>
+                  <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-button type="primary" size="small" @click="switchLanguage">English</el-button>
           </template>
         </div>
       </el-header>
@@ -58,7 +71,9 @@ export default {
     return {
       activeMenu: '/data/view',
       isLoggedIn: false,
-      username: ''
+      username: '',
+      isAdmin: false, // 是否管理员(用户中心下拉显示用户管理/下载记录入口)
+      unreadCount: 0 // 未读通知数(审批结果等),用户中心角标
     };
   },
   mounted() {
@@ -69,6 +84,7 @@ export default {
     '$route.path'(newPath) {
       this.activeMenu = newPath;
       this.syncLoginState();
+      this.refreshUnread();
     }
   },
   methods: {
@@ -76,6 +92,7 @@ export default {
       const token = localStorage.getItem('auth_token');
       this.isLoggedIn = !!token;
       this.username = token ? this.getStoredUsername() : '';
+      this.isAdmin = token ? this.getStoredIsAdmin() : false;
     },
     getStoredUsername() {
       try {
@@ -83,6 +100,14 @@ export default {
         return user.username || '';
       } catch (e) {
         return '';
+      }
+    },
+    getStoredIsAdmin() {
+      try {
+        const user = JSON.parse(localStorage.getItem('auth_user') || '{}');
+        return !!user.is_admin;
+      } catch (e) {
+        return false;
       }
     },
     // 启动时用后端校验 token 是否仍有效
@@ -93,13 +118,23 @@ export default {
         .then(({ data }) => {
           this.isLoggedIn = true;
           this.username = data.username;
-          localStorage.setItem('auth_user', JSON.stringify({ username: data.username, email: data.email }));
+          this.isAdmin = !!data.is_admin;
+          localStorage.setItem('auth_user', JSON.stringify({ username: data.username, email: data.email, is_admin: !!data.is_admin, institution: data.institution || '' }));
+          this.refreshUnread();
         })
         .catch(() => {
           // 401 时拦截器已清除本地登录态并跳转登录页
           this.isLoggedIn = false;
           this.username = '';
+          this.isAdmin = false;
         });
+    },
+    // 刷新未读通知数(登录后/切换页面时;用户中心内标记已读后,离开时重新拉取)
+    refreshUnread() {
+      if (!this.isLoggedIn) return;
+      axios.get('/api/notifications')
+        .then(({ data }) => { this.unreadCount = data.unread; })
+        .catch(() => {});
     },
     handleMenuSelect(index) {
       this.$router.push(index);
@@ -111,11 +146,14 @@ export default {
     goToLogin() {
       this.$router.push('/login');
     },
-    goToUserCenter() {
-      this.$router.push('/profile');
-    },
-    goToDownloads() {
-      this.$router.push('/downloads');
+    // 用户中心下拉菜单: downloads=我的下载; profile:xxx=用户中心指定 tab; logout=退出登录
+    handleUserMenu(command) {
+      if (command === 'logout') { this.handleLogout(); return; }
+      if (command.startsWith('profile:')) {
+        this.$router.push({ path: '/profile', query: { tab: command.split(':')[1] } });
+        return;
+      }
+      if (command === 'downloads') { this.$router.push('/downloads'); }
     },
     handleLogout() {
       axios.post('/api/logout').catch(() => {});
@@ -123,6 +161,8 @@ export default {
       localStorage.removeItem('auth_user');
       this.isLoggedIn = false;
       this.username = '';
+      this.isAdmin = false;
+      this.unreadCount = 0;
       this.$message.info('您已退出登录');
       this.$router.push('/login');
     }
@@ -144,6 +184,12 @@ html, body {
 .el-container {
   height: 100%;
   flex-direction: column;
+}
+/* 用户中心下拉菜单(唯一的 el-dropdown): 菜单项文字居中 */
+.el-dropdown-menu .el-dropdown-menu__item {
+  justify-content: center;
+  text-align: center;
+  min-width: 140px;
 }
 </style>
 
@@ -195,11 +241,37 @@ html, body {
   justify-content: flex-end;
   padding-right: 20px;
 }
-.header-right .username {
-  font-size: 16px;
-  font-weight: 500;
-  color: #333;
-  margin-right: 4px;
+/* 用户名下拉触发按钮(替代原用户中心按钮) */
+.header-right .username-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 20px;
+  font-weight: bold;
+  color: #2c6b9e;
+  background-color: #ffffff;
+  border: 1px solid #d3dce6;
+  border-radius: 4px;
+  padding: 14px 20px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  line-height: 1;
+}
+.header-right .username-btn:hover {
+  border-color: #2c6b9e;
+  color: #2c6b9e;
+  background-color: #f0f7ff;
+}
+.header-right .caret {
+  font-size: 14px;
+  color: #999;
+}
+.header-right .notify-badge {
+  line-height: 1;
+}
+.header-right .notify-badge :deep(.el-badge__content) {
+  transform: translate(50%, -50%);
 }
 .main-content {
   background-color: #f5f7fa;
@@ -220,11 +292,5 @@ html, body {
   font-weight: bold !important;
   padding: 14px 28px !important;
   height: auto !important;
-}
-/* 我的下载/退出按钮缩小,不与用户中心等主按钮同样大小 */
-:deep(.header-right .el-button.header-small-btn) {
-  font-size: 14px !important;
-  font-weight: normal !important;
-  padding: 6px 12px !important;
 }
 </style>

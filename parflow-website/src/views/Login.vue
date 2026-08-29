@@ -251,10 +251,15 @@ export default {
         this.registerLoading = true;
         const { username, password, email } = this.registerForm;
         axios.post('/api/register', { username, password, email })
-          .then(({ data }) => {
-            this.saveAuth(data);
-            this.$message.success(`注册成功，欢迎 ${data.username}！`);
-            this.$router.push('/');
+          .then(() => {
+            // 注册成功不自动登录:清空密码、预填用户名并切回登录页
+            this.registerForm.password = '';
+            this.registerForm.confirmPassword = '';
+            this.loginForm.username = username;
+            this.loginForm.password = '';
+            this.activeTab = 'login';
+            this.handleTabClick();
+            this.$message.success('注册成功，请登录');
           })
           .catch((err) => {
             this.$message.error(err.response?.data?.error || '注册失败，请稍后重试');
